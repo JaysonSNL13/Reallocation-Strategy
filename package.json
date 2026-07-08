@@ -1,0 +1,16 @@
+{
+  "name": "suit-reallocation-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "State & Liberty store-to-store suit reallocation engine (Google Apps Script + Sheets + Brightpearl).",
+  "scripts": {
+    "login": "clasp login",
+    "push": "clasp push",
+    "pull": "clasp pull",
+    "open": "clasp open",
+    "deploy": "clasp push && clasp open"
+  },
+  "devDependencies": {
+    "@google/clasp": "^2.4.2"
+  }
+}
