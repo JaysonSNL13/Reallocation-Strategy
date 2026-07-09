@@ -88,6 +88,11 @@ function writesEnabled_() {
   return String(getProp_(PROP.BP_WRITES_ENABLED, 'false')).toLowerCase() === 'true';
 }
 
+/** True only when all Brightpearl credentials are present. Used to choose live vs preview. */
+function bpConfigured_() {
+  return !!(getProp_(PROP.BP_BASE_URL) && getProp_(PROP.BP_APP_REF) && getProp_(PROP.BP_ACCOUNT_TOKEN));
+}
+
 function bqBillingProject_() {
   return getProp_(PROP.BQ_BILLING_PROJECT, BQ.DATA_PROJECT);
 }
@@ -327,16 +332,15 @@ var BP = (function () {
    * Reads the current record first so reorderQuantity is preserved.
    */
   function zeroReorderLevel(warehouseId, productId) {
+    // Dry run first — no Brightpearl call at all (so it works with no token set).
+    if (!writesEnabled_()) {
+      Log.info('[DRY RUN] would set reorderLevel=0 for wh ' + warehouseId + ' product ' + productId);
+      return { dryRun: true, priorLevel: null };
+    }
     var current = null;
     try { current = getWarehouseProduct(warehouseId, productId); } catch (e) { /* fall through */ }
     var keepQty = (current && current.reorderQuantity != null) ? Number(current.reorderQuantity) : 0;
     var priorLevel = (current && current.reorderLevel != null) ? Number(current.reorderLevel) : null;
-
-    if (!writesEnabled_()) {
-      Log.info('[DRY RUN] would set reorderLevel=0 (was ' + priorLevel + ', keep qty ' + keepQty +
-        ') for wh ' + warehouseId + ' product ' + productId);
-      return { dryRun: true, priorLevel: priorLevel };
-    }
     request_('PUT', '/warehouse-service/warehouse/' + warehouseId + '/product/' + productId,
       { reorderLevel: 0, reorderQuantity: keepQty });
     return { dryRun: false, priorLevel: priorLevel };
@@ -946,6 +950,33 @@ function fetchStyleProductsFromSheet_(styles) {
   return byStyle;
 }
 
+/**
+ * Preview availability from the workbook (INV on-hand) for when no Brightpearl token is set.
+ * Returns { productId: { warehouseId: { available: onHand } } } to mirror BP.getAvailability.
+ */
+function getSheetAvailability_(styles) {
+  var want = {}; (styles || []).forEach(function (s) { want[s] = true; });
+  var ss = openSource_();
+  var loc = buildLocMap_(ss);
+  var dim = buildDimension_(ss);
+  var inv = readTab_(ss, SRC.INV.tab, SRC.INV.mustContain);
+  var iPid = colOf_(inv.headers, SRC.INV.pid), iWh = colOf_(inv.headers, SRC.INV.wh), iOh = colOf_(inv.headers, SRC.INV.onhand);
+  var dcNorm = norm_(DC_WAREHOUSE_NAME);
+  var out = {};
+  inv.rows.forEach(function (r) {
+    var pid = String(r[iPid] || '').trim();
+    var d = dim.byPid[pid];
+    if (!d || !want[d.style]) return;
+    var whName = norm_(r[iWh]);
+    var wid = (whName === dcNorm) ? DC_WAREHOUSE_ID : loc.nameToId[whName];
+    if (!wid) return;
+    var oh = num_(r[iOh]);
+    if (oh <= 0) return;
+    (out[pid] = out[pid] || {})[wid] = { available: oh };
+  });
+  return out;
+}
+
 // ---- Source router (used by Weekly.gs / Actions.gs) ------------------------
 
 function getCandidates_()   { return dataSource_() === 'bigquery' ? fetchCandidates_()   : fetchCandidatesFromSheet_(); }
@@ -1343,7 +1374,10 @@ function executeApprovedTransfers() {
   // Live availability for all in-scope productIds.
   var allPids = [];
   styles.forEach(function (s) { (styleProducts[s] || []).forEach(function (p) { allPids.push(p.product_id); }); });
-  var avail = BP.getAvailability(uniq_(allPids));
+  // Live Brightpearl availability if a token is configured; otherwise PREVIEW from the workbook's on-hand.
+  var usingLive = bpConfigured_();
+  var avail = usingLive ? BP.getAvailability(uniq_(allPids)) : getSheetAvailability_(styles);
+  Log.info('Execute using ' + (usingLive ? 'LIVE Brightpearl availability' : 'PREVIEW availability from the workbook') + '.');
 
   var byDonor = {};        // donorWid -> {name, items:[...]}
   var receiving = [];      // rows for Receiving Priority
@@ -1410,7 +1444,7 @@ function executeApprovedTransfers() {
   appendTracker_(trackerRows);
 
   var summary = (live ? 'Created' : 'Dry-run created') + ' ' + created + ' transfer(s), skipped ' + skipped +
-    '. Emails: ' + emailReport.filter(function (r) { return r.sent; }).length + ' sent/preview.';
+    '. Email drafts created: ' + emailReport.filter(function (r) { return r.drafted; }).length + ' (check Gmail ▸ Drafts).';
   Log.info(summary);
   ui_().alert('Done', summary, ui_().ButtonSet.OK);
 }
@@ -1526,29 +1560,16 @@ function escapeHtml_(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;
  * Returns a report array for logging.
  */
 function sendStorePullLists_(byDonor) {
-  var live = writesEnabled_();
-  var dryEmail = getProp_(PROP.DRY_RUN_EMAIL);
-  var bcc = getProp_(PROP.EMAIL_BCC);
-  var map = storeEmailMap_();
   var report = [];
-
   Object.keys(byDonor).forEach(function (wid) {
     var donor = byDonor[wid];
-    var mail = buildPullListEmail_(donor.name, donor.items, !live);
-    var to = live ? resolveStoreEmail_(map, wid, donor.name) : dryEmail;
-
-    if (!to) {
-      var why = live ? ('no email on file for ' + donor.name + ' (add it to "' + SHEET.STORE_EMAILS + '")')
-                     : 'dry run and no DRY_RUN_EMAIL set';
-      report.push({ donor: donor.name, sent: false, reason: why });
-      Log.warn('Pull-list not sent: ' + why);
-      return;
-    }
-    var opts = { htmlBody: mail.html, name: 'S&L Reallocation' };
-    if (bcc && live) opts.bcc = bcc;
-    GmailApp.sendEmail(to, mail.subject, 'This email requires HTML.', opts);
-    report.push({ donor: donor.name, sent: true, to: to, units: donor.items.reduce(function (a, i) { return a + i.qty; }, 0) });
-    Log.info('Pull-list ' + (live ? 'sent' : 'preview') + ' to ' + to + ' for ' + donor.name);
+    var mail = buildPullListEmail_(donor.name, donor.items, false);
+    // Create a Gmail DRAFT with NO recipient (To left blank). A person reviews it,
+    // adds the store address, and sends. Nothing is sent automatically.
+    GmailApp.createDraft('', mail.subject, 'This email requires HTML.', { htmlBody: mail.html, name: 'S&L Reallocation' });
+    var units = donor.items.reduce(function (a, i) { return a + i.qty; }, 0);
+    report.push({ donor: donor.name, drafted: true, units: units });
+    Log.info('Pull-list DRAFT created (no recipient) for ' + donor.name + ' — ' + units + ' units.');
   });
   return report;
 }
