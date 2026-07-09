@@ -16,7 +16,7 @@ function readApprovedRows_() {
   values.forEach(function (r, i) {
     var isApproved = r[COL.APPROVE - 1] === true;
     var status = String(r[COL.STATUS - 1] || '');
-    var alreadyDone = /CREATED|SHIPPED|RECEIVED/i.test(status);
+    var alreadyDone = /CREATED|DRY RUN|SHIPPED|RECEIVED|LOGGED/i.test(status);
     if (isApproved && !alreadyDone) {
       approved.push({
         rowIndex: 2 + i,

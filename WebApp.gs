@@ -93,13 +93,23 @@ function webRunProposal() {
   return getProposalsData();
 }
 
-/** Create transfers + email drafts for all approved lines (consolidated per store pair). */
-function webExecuteApproved() {
-  var r = executeApprovedCore_();
+/**
+ * Create transfer + email draft + CSV for approved lines. With donorWid+recipWid, does just
+ * that one from→to group (per-group button); with no args, does all approved groups.
+ */
+function webExecuteApproved(donorWid, recipWid) {
+  var opts = (donorWid && recipWid) ? { donorWid: donorWid, recipWid: recipWid } : {};
+  // DEMO_MODE (default on): just move approved rows to Log — no Brightpearl, no email.
+  var r = demoMode_() ? demoLogApproved_(opts) : executeApprovedCore_(opts);
   var data = getProposalsData();
   data.execMessage = r.summary;
   data.csv = r.csv || '';
   return data;
+}
+
+/** Build + return the transfer-list CSV for all approved groups, without creating anything. */
+function webExportApprovedCsv() {
+  return exportApprovedCsv_();
 }
 
 /** Latest transfer-list CSV text (from the Transfer CSV tab), for the dashboard download button. */

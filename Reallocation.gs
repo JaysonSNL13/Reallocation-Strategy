@@ -22,11 +22,19 @@ const PROP = {
   EMAIL_BCC: 'EMAIL_BCC',               // optional: BCC on every store pull-list email
   DRY_RUN_EMAIL: 'DRY_RUN_EMAIL',       // if set, ALL store emails route here instead (safe testing)
   DATA_SOURCE: 'DATA_SOURCE',           // 'sheet' (default) or 'bigquery'
-  SOURCE_SPREADSHEET_ID: 'SOURCE_SPREADSHEET_ID' // the "Store Dashboard for WebApp" workbook id
+  SOURCE_SPREADSHEET_ID: 'SOURCE_SPREADSHEET_ID', // the "Store Dashboard for WebApp" workbook id
+  DEMO_MODE: 'DEMO_MODE'                // 'true' (default): Create just moves rows to Log, no email/Brightpearl
 };
 
 // Where the engine reads its ranking input from. Defaults to the Store Dashboard workbook.
 function dataSource_() { return String(getProp_(PROP.DATA_SOURCE, 'sheet')).toLowerCase(); }
+
+/**
+ * Demo mode (default ON). When on, "Create transfer/email" only moves approved rows to Log —
+ * it does NOT create Brightpearl transfers or Gmail drafts. Devs set DEMO_MODE = false to
+ * turn on the real transfer + email actions.
+ */
+function demoMode_() { return String(getProp_(PROP.DEMO_MODE, 'true')).toLowerCase() !== 'false'; }
 
 // ---- BigQuery mirror --------------------------------------------------------
 const BQ = {
@@ -178,7 +186,6 @@ function runFractions_(toks, blzFull, pntFull) {
 
 function toBool_(v) { return v === true || v === 'true' || v === 1 || v === '1'; }
 function num_(v) { return Number(v || 0); }
-
 /* ===================== Brightpearl.gs ===================== */
 /**
  * Brightpearl.gs — thin Brightpearl REST client.
@@ -395,7 +402,6 @@ var BP = (function () {
     zeroReorderLevel: zeroReorderLevel
   };
 })();
-
 /* ===================== Queries.gs ===================== */
 /**
  * Queries.gs — the BigQuery SQL that defines the engine's input data.
@@ -502,7 +508,6 @@ SELECT CAST(product_id AS STRING) product_id, sku, garment, size_num, style FROM
 WHERE size_num IS NOT NULL AND style IN (${quoted})
   AND ((garment='Blazer' AND size_num IN (36,38,40,42,44,46,48)) OR (garment='Pant' AND size_num IN (29,30,31,32,33,34,36,38,40)))`;
 }
-
 /* ===================== BigQuery.gs ===================== */
 /**
  * BigQuery.gs — run queries against the Brightpearl mirror via the BigQuery advanced
@@ -614,7 +619,6 @@ function unpackRepeated_(cell) {
   if (Array.isArray(cell)) return cell.map(function (x) { return (x && x.v !== undefined) ? x.v : x; });
   return [];
 }
-
 /* ===================== SourceSheet.gs ===================== */
 /**
  * SourceSheet.gs — read the engine's ranking input from the "Store Dashboard for WebApp"
@@ -1008,7 +1012,6 @@ function getSheetAvailability_(styles) {
 function getCandidates_()   { return dataSource_() === 'bigquery' ? fetchCandidates_()   : fetchCandidatesFromSheet_(); }
 function getAlive30_()      { return dataSource_() === 'bigquery' ? fetchAlive30_()      : fetchAlive30FromSheet_(); }
 function getStyleProducts_(styles) { return dataSource_() === 'bigquery' ? fetchStyleProducts_(styles) : fetchStyleProductsFromSheet_(styles); }
-
 /* ===================== Engine.gs ===================== */
 /**
  * Engine.gs — the reallocation logic (spec Part A). Faithful port of the live tool's
@@ -1204,7 +1207,6 @@ function matchSuits_(cands, alive30) {
 
   return moves;
 }
-
 /* ===================== Proposals.gs ===================== */
 /**
  * Proposals.gs — write the ranked transfer list to the "Proposed Transfers" tab.
@@ -1244,58 +1246,73 @@ const PROPOSAL_HEADERS = [
 
 function statusValue_(s) { return s || 'PROPOSED'; }
 
-/** Expand ranked moves into per-transfer rows and write them to the sheet. */
+/** Stable key for a proposed transfer line, used to preserve state across re-runs. */
+function proposalKey_(style, donorWid, recipWid) { return style + '|' + donorWid + '|' + recipWid; }
+
+function isDoneStatus_(s) { return /CREATED|DRY RUN|SHIPPED|RECEIVED|LOGGED/i.test(String(s || '')); }
+
+/**
+ * Expand ranked moves into per-transfer rows and write them to the sheet.
+ * MERGE, not overwrite: any line already Approved or done (LOGGED/CREATED/…) keeps that state
+ * on a re-run — so you never re-approve, and logged history persists even if the engine no
+ * longer proposes that line.
+ */
 function writeProposals_(moves) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName(SHEET.PROPOSALS) || ss.insertSheet(SHEET.PROPOSALS);
+
+  // Snapshot prior state by key.
+  var prior = {};
+  if (sh.getLastRow() > 1) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, PROPOSAL_HEADERS.length).getValues().forEach(function (r) {
+      var key = proposalKey_(r[COL.STYLE - 1], r[COL.DONOR_WH - 1], r[COL.RECIP_WH - 1]);
+      prior[key] = { approve: r[COL.APPROVE - 1] === true, status: r[COL.STATUS - 1],
+        transferId: r[COL.TRANSFER_ID - 1], updated: r[COL.UPDATED - 1], notes: r[COL.NOTES - 1], row: r };
+    });
+  }
+
   sh.clear();
   sh.getRange(1, 1, 1, PROPOSAL_HEADERS.length).setValues([PROPOSAL_HEADERS])
     .setFontWeight('bold').setBackground('#111111').setFontColor('#ffffff');
   sh.setFrozenRows(1);
 
-  var rows = [];
+  var rows = [], seen = {}, preserved = 0;
   moves.forEach(function (m, idx) {
     var rank = idx + 1;
     (m.donors || []).forEach(function (d) {
+      var key = proposalKey_(m.style, d.wid, m.recip_wid);
+      seen[key] = true;
+      var p = prior[key];
+      if (p && (p.approve || isDoneStatus_(p.status))) preserved++;
       var flags = [];
       if (m.force) flags.push('FORCE EMPTY');
       if (!m.has_thr) flags.push('CONFIRM — NO THRESHOLD');
       rows.push([
-        false,                                  // Approve
-        rank,                                   // Rank (shared across a recipient's donors)
-        m.force ? 'Force-empty' : 'Regular',    // Type
-        m.style,                                // Style
-        d.name, d.wid,                          // Donor store / WH
-        m.recipient, m.recip_wid,               // Recipient store / WH
-        m.rank_gap,                             // Rank gap
-        d.rank,                                 // Donor sales rank
-        m.recip_rank,                           // Recip sales rank
-        m.recip_run,                            // Recip run now
-        m.recip_final,                          // Recip run after
-        d.units,                                // donor holding (mirror)
-        flags.join(' · '),                      // Flags
-        '',                                     // Transfer ID
-        statusValue_(),                         // Status
-        '',                                     // Last update
-        ''                                      // Notes
+        p ? p.approve : false, rank, m.force ? 'Force-empty' : 'Regular', m.style,
+        d.name, d.wid, m.recipient, m.recip_wid, m.rank_gap, d.rank, m.recip_rank,
+        m.recip_run, m.recip_final, d.units, flags.join(' · '),
+        p ? p.transferId : '', p ? statusValue_(p.status) : statusValue_(),
+        p ? p.updated : '', p ? p.notes : ''
       ]);
     });
   });
 
+  // Persist prior Approved/logged lines the engine no longer proposes.
+  Object.keys(prior).forEach(function (key) {
+    if (seen[key]) return;
+    var p = prior[key];
+    if (p.approve || isDoneStatus_(p.status)) { rows.push(p.row); preserved++; }
+  });
+
   if (rows.length) {
     sh.getRange(2, 1, rows.length, PROPOSAL_HEADERS.length).setValues(rows);
-    // Approve column as checkboxes.
     sh.getRange(2, COL.APPROVE, rows.length, 1).insertCheckboxes();
-    // Percent format for run columns.
     sh.getRange(2, COL.RUN_NOW, rows.length, 2).setNumberFormat('0%');
   }
-
-  // Cosmetics.
   sh.autoResizeColumns(1, PROPOSAL_HEADERS.length);
-  sh.getRange(1, 1, sh.getMaxRows(), PROPOSAL_HEADERS.length).setVerticalAlignment('middle');
   formatFlagRows_(sh, rows.length);
 
-  Log.info('Wrote ' + rows.length + ' proposed transfers across ' + moves.length + ' recipient moves.');
+  Log.info('Wrote ' + rows.length + ' proposal rows (preserved ' + preserved + ' already approved/logged).');
   return rows.length;
 }
 
@@ -1310,7 +1327,6 @@ function formatFlagRows_(sh, n) {
     }
   }
 }
-
 /* ===================== Approval.gs ===================== */
 /**
  * Approval.gs — read Jayson's per-row approvals from the Proposed Transfers tab.
@@ -1330,7 +1346,7 @@ function readApprovedRows_() {
   values.forEach(function (r, i) {
     var isApproved = r[COL.APPROVE - 1] === true;
     var status = String(r[COL.STATUS - 1] || '');
-    var alreadyDone = /CREATED|SHIPPED|RECEIVED/i.test(status);
+    var alreadyDone = /CREATED|DRY RUN|SHIPPED|RECEIVED|LOGGED/i.test(status);
     if (isApproved && !alreadyDone) {
       approved.push({
         rowIndex: 2 + i,
@@ -1365,7 +1381,6 @@ function markRow_(rowIndex, fields) {
 function countNoThresholdApprovals_(approvedRows) {
   return approvedRows.filter(function (r) { return r.flags.indexOf('NO THRESHOLD') >= 0; }).length;
 }
-
 /* ===================== Actions.gs ===================== */
 /**
  * Actions.gs — fired when Jayson runs "Execute approved transfers".
@@ -1399,59 +1414,39 @@ function executeApprovedTransfers() {
 }
 
 /**
- * Headless execute (no UI) — used by the menu wrapper AND the web dashboard button.
- * CONSOLIDATES approved lines by donor→recipient so ONE transfer and ONE email cover every
- * approved style for that store pair. Returns { summary, created, skipped, drafts }.
+ * Headless execute (no UI) — used by the menu wrapper AND the web dashboard.
+ * CONSOLIDATES approved lines by donor→recipient: ONE transfer + ONE email draft + one CSV
+ * block per store pair. Pass {donorWid, recipWid} to run a SINGLE pair (per-group button).
+ * Returns { summary, created, skipped, drafts, csv }.
  */
-function executeApprovedCore_() {
+function executeApprovedCore_(opts) {
+  opts = opts || {};
   var approved = readApprovedRows_();
-  if (!approved.length) return { summary: 'Nothing approved to execute.', created: 0, skipped: 0, drafts: 0 };
+  if (opts.donorWid && opts.recipWid) {
+    approved = approved.filter(function (r) {
+      return String(r.donorWid) === String(opts.donorWid) && String(r.recipWid) === String(opts.recipWid);
+    });
+  }
+  if (!approved.length) return { summary: 'Nothing approved to execute.', created: 0, skipped: 0, drafts: 0, csv: '' };
   var live = writesEnabled_();
 
-  var styles = uniq_(approved.map(function (a) { return a.style; }));
-  var styleProducts = getStyleProducts_(styles);
-  var allPids = [];
-  styles.forEach(function (s) { (styleProducts[s] || []).forEach(function (p) { allPids.push(p.product_id); }); });
-  var usingLive = bpConfigured_();
-  var avail = usingLive ? BP.getAvailability(uniq_(allPids)) : getSheetAvailability_(styles);
-  Log.info('Execute using ' + (usingLive ? 'LIVE Brightpearl availability' : 'PREVIEW availability from the workbook') + '.');
-
-  // Consolidate approved lines by donor→recipient pair.
-  var pairs = {};
-  approved.forEach(function (row) {
-    var k = row.donorWid + '|' + row.recipWid;
-    var p = pairs[k] || (pairs[k] = { donorWid: row.donorWid, donorName: row.donorName, recipWid: row.recipWid,
-      recipientName: row.recipientName, force: false, rows: [], styles: {} });
-    p.rows.push(row); p.styles[row.style] = true; if (row.force) p.force = true;
-  });
-
-  var byDonor = {}, receiving = [], trackerRows = [], csvRows = [];
+  var pairs = buildApprovedPairs_(approved);
   var stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd');
   var mdate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'M/d');
-  var created = 0, skipped = 0;
+  var receiving = [], trackerRows = [], csvRows = [];
+  var created = 0, skipped = 0, drafts = 0;
 
-  Object.keys(pairs).forEach(function (k) {
-    var p = pairs[k];
-    var items = [];
-    Object.keys(p.styles).forEach(function (style) {
-      (styleProducts[style] || []).forEach(function (prod) {
-        var a = (avail[prod.product_id] && avail[prod.product_id][p.donorWid]) || null;
-        var qty = a ? a.available : 0;
-        if (qty > 0) items.push({ productId: prod.product_id, sku: prod.sku, garment: prod.garment, size: prod.size, style: style, quantity: qty });
-      });
-    });
-
-    if (!items.length) {
+  pairs.forEach(function (p) {
+    if (!p.items.length) {
       p.rows.forEach(function (row) { markRow_(row.rowIndex, { status: 'SKIPPED — no live stock', notes: 'Donor holds 0 available at execution.' }); });
       skipped++;
       return;
     }
-
     var reference = 'PURGE-PRIORITY-REALLOC-' + p.donorWid + 'to' + p.recipWid + '-' + stamp;
     var result;
     try {
       result = BP.createStockTransfer(p.donorWid, p.recipWid, reference,
-        items.map(function (it) { return { productId: it.productId, quantity: it.quantity }; }));
+        p.items.map(function (it) { return { productId: it.productId, quantity: it.quantity }; }));
     } catch (e) {
       p.rows.forEach(function (row) { markRow_(row.rowIndex, { status: 'ERROR', notes: String(e.message || e) }); });
       Log.error('Transfer failed ' + p.donorWid + '->' + p.recipWid + ': ' + e);
@@ -1464,40 +1459,96 @@ function executeApprovedCore_() {
     });
     created++;
 
-    items.forEach(function (it) {
+    p.items.forEach(function (it) {
       try { BP.zeroReorderLevel(p.donorWid, it.productId); }
       catch (e) { Log.warn('zeroReorderLevel failed wh ' + p.donorWid + ' pid ' + it.productId + ': ' + e); }
     });
 
-    var d = byDonor[p.donorWid] || (byDonor[p.donorWid] = { name: p.donorName, items: [] });
-    items.forEach(function (it) {
-      d.items.push({ recipientName: p.recipientName, style: it.style, garment: it.garment, size: it.size, sku: it.sku, qty: it.quantity, transferId: tid });
-    });
+    // ONE email DRAFT for THIS from→to group (blank To — a person adds the address and sends).
+    if (createPairDraft_(p, tid)) drafts++;
 
-    var units = items.reduce(function (a, it) { return a + it.quantity; }, 0);
+    // CSV block for the group.
+    csvRows.push(['', p.donorName, p.recipientName, 'realloc-' + storeCode_(p.recipientName) + '-' + mdate]);
+    p.items.forEach(function (it) { csvRows.push([it.sku, it.quantity, '', '']); });
+
+    var units = p.items.reduce(function (a, it) { return a + it.quantity; }, 0);
     var styleLabel = Object.keys(p.styles).join(', ');
     receiving.push([new Date(), tid, styleLabel, p.donorName, p.recipientName, units, reference, p.force ? 'FORCE' : '']);
     trackerRows.push([new Date(), tid, styleLabel, p.donorName, p.donorWid, p.recipientName, p.recipWid, units,
       (result.goodsOutNoteIds || []).join(','), 'CREATED', new Date(), 0, p.force ? 'FORCE' : 'REGULAR']);
-
-    // Zipline transfer-list CSV block: header row (blank A, From=donor in B, To=recipient in C,
-    // ref in D), then one SKU/qty row each (C and D blank — location/ref not repeated).
-    var csvRef = 'realloc-' + storeCode_(p.recipientName) + '-' + mdate;
-    csvRows.push(['', p.donorName, p.recipientName, csvRef]);
-    items.forEach(function (it) { csvRows.push([it.sku, it.quantity, '', '']); });
   });
 
-  var emailReport = sendStorePullLists_(byDonor);
   appendReceiving_(receiving);
   appendTracker_(trackerRows);
-
-  var drafts = emailReport.filter(function (r) { return r.drafted; }).length;
   if (csvRows.length) writeTransferCsv_(csvRows);
   var csvText = csvRows.map(function (r) { return r.map(csvCell_).join(','); }).join('\r\n');
-  var summary = (live ? 'Created' : 'Dry-run created') + ' ' + created + ' consolidated transfer(s), skipped ' + skipped +
-    '. Email drafts: ' + drafts + '. Transfer-list CSV: ' + (csvRows.length ? 'ready to download' : 'none') + '.';
+  var summary = (live ? 'Created' : 'Dry-run created') + ' ' + created + ' transfer(s) (one per store pair), skipped ' + skipped +
+    '. Email drafts (Gmail ▸ Drafts): ' + drafts + '. CSV: ' + (csvRows.length ? 'ready' : 'none') + '.';
   Log.info(summary);
   return { summary: summary, created: created, skipped: skipped, drafts: drafts, csv: csvText };
+}
+
+/**
+ * Group approved rows into donor→recipient pairs, each with its live pull-list items (SKU+qty).
+ * Availability = live Brightpearl if a token is set, else the workbook on-hand.
+ */
+function buildApprovedPairs_(approved) {
+  var styles = uniq_(approved.map(function (a) { return a.style; }));
+  var styleProducts = getStyleProducts_(styles);
+  var allPids = [];
+  styles.forEach(function (s) { (styleProducts[s] || []).forEach(function (p) { allPids.push(p.product_id); }); });
+  var avail = bpConfigured_() ? BP.getAvailability(uniq_(allPids)) : getSheetAvailability_(styles);
+
+  var byKey = {};
+  approved.forEach(function (row) {
+    var k = row.donorWid + '|' + row.recipWid;
+    var p = byKey[k] || (byKey[k] = { donorWid: row.donorWid, donorName: row.donorName, recipWid: row.recipWid,
+      recipientName: row.recipientName, force: false, rows: [], styles: {} });
+    p.rows.push(row); p.styles[row.style] = true; if (row.force) p.force = true;
+  });
+
+  return Object.keys(byKey).map(function (k) {
+    var p = byKey[k];
+    var items = [];
+    Object.keys(p.styles).forEach(function (style) {
+      (styleProducts[style] || []).forEach(function (prod) {
+        var a = (avail[prod.product_id] && avail[prod.product_id][p.donorWid]) || null;
+        var qty = a ? a.available : 0;
+        if (qty > 0) items.push({ productId: prod.product_id, sku: prod.sku, garment: prod.garment, size: prod.size, style: style, quantity: qty });
+      });
+    });
+    p.items = items;
+    return p;
+  });
+}
+
+/** Create ONE Gmail draft (blank To) for a donor→recipient group. Returns true if made. */
+function createPairDraft_(p, tid) {
+  var items = p.items.map(function (it) {
+    return { recipientName: p.recipientName, style: it.style, garment: it.garment, size: it.size, sku: it.sku, qty: it.quantity, transferId: tid };
+  });
+  var mail = buildPullListEmail_(p.donorName, items, false);
+  var units = p.items.reduce(function (a, it) { return a + it.quantity; }, 0);
+  var subject = 'Suit reallocation — ' + p.donorName + ' → ' + p.recipientName + ' (' + units + ' unit' + (units === 1 ? '' : 's') + ')';
+  GmailApp.createDraft('', subject, 'This email requires HTML.', { htmlBody: mail.html, name: 'S&L Reallocation' });
+  Log.info('Draft created (no recipient): ' + p.donorName + ' → ' + p.recipientName);
+  return true;
+}
+
+/** Build the transfer-list CSV from currently-approved rows WITHOUT creating transfers/emails. */
+function exportApprovedCsv_() {
+  var approved = readApprovedRows_();
+  if (!approved.length) return '';
+  var pairs = buildApprovedPairs_(approved);
+  var mdate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'M/d');
+  var csvRows = [];
+  pairs.forEach(function (p) {
+    if (!p.items.length) return;
+    csvRows.push(['', p.donorName, p.recipientName, 'realloc-' + storeCode_(p.recipientName) + '-' + mdate]);
+    p.items.forEach(function (it) { csvRows.push([it.sku, it.quantity, '', '']); });
+  });
+  if (csvRows.length) writeTransferCsv_(csvRows);
+  return csvRows.map(function (r) { return r.map(csvCell_).join(','); }).join('\r\n');
 }
 
 /** CSV-escape a cell (quote if it contains comma/quote/newline). */
@@ -1544,6 +1595,25 @@ function uniq_(a) { var s = {}; (a || []).forEach(function (x) { s[x] = true; })
 function slug_(s) { return String(s).replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, ''); }
 function ui_() { return SpreadsheetApp.getUi(); }
 
+/**
+ * DEMO create — moves approved lines to Log (status LOGGED) with NO Brightpearl transfer and
+ * NO email. Used while DEMO_MODE is on so the flow can be tested/handed to devs. Pass
+ * {donorWid, recipWid} to log just one from→to group.
+ */
+function demoLogApproved_(opts) {
+  opts = opts || {};
+  var approved = readApprovedRows_();
+  if (opts.donorWid && opts.recipWid) {
+    approved = approved.filter(function (r) { return String(r.donorWid) === String(opts.donorWid) && String(r.recipWid) === String(opts.recipWid); });
+  }
+  if (!approved.length) return { summary: 'Nothing approved to log.', created: 0, skipped: 0, drafts: 0, csv: '' };
+  var stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
+  approved.forEach(function (row) {
+    markRow_(row.rowIndex, { transferId: 'DEMO', status: 'LOGGED', notes: 'Demo — logged ' + stamp + ' (no transfer/email created)' });
+  });
+  Log.info('DEMO: logged ' + approved.length + ' approved line(s) — no transfer/email created.');
+  return { summary: 'Demo: moved ' + approved.length + ' line(s) to Log. No transfer or email created.', created: approved.length, skipped: 0, drafts: 0, csv: '' };
+}
 /* ===================== Email.gs ===================== */
 /**
  * Email.gs — build and send each donor store its pull list (what to box up).
@@ -1639,7 +1709,6 @@ function sendStorePullLists_(byDonor) {
   });
   return report;
 }
-
 /* ===================== Tracker.gs ===================== */
 /**
  * Tracker.gs — the 48-hour loop.
@@ -1765,7 +1834,6 @@ function sendNudges_(byDonor) {
     Log.info('Nudge ' + (live ? 'sent' : 'preview') + ' to ' + to + ' for ' + d.name);
   });
 }
-
 /* ===================== Weekly.gs ===================== */
 /**
  * Weekly.gs — the once-a-week pull + engine + proposal write.
@@ -1803,7 +1871,6 @@ function writeRunLogSummary_(moves, nRows, ms) {
     Object.keys(recipSet).length + ' recipient stores, ~' + units + ' units, ' +
     (ms / 1000).toFixed(1) + 's. Writes ' + (writesEnabled_() ? 'ENABLED' : 'DISABLED (dry run)') + '.');
 }
-
 /* ===================== Menu.gs ===================== */
 /**
  * Menu.gs — the spreadsheet UI, setup prompts, and trigger installation.
@@ -1959,7 +2026,6 @@ function installTriggers() {
   ScriptApp.newTrigger('runTracker').timeBased().everyHours(6).create();
   SpreadsheetApp.getUi().alert('Triggers installed: weekly proposal (Mon 6am) + tracker (every 6h).');
 }
-
 /* ===================== WebApp.gs ===================== */
 /**
  * WebApp.gs — serves the HTML dashboard (a replica of the original suit-reallocation tool)
@@ -2056,13 +2122,23 @@ function webRunProposal() {
   return getProposalsData();
 }
 
-/** Create transfers + email drafts for all approved lines (consolidated per store pair). */
-function webExecuteApproved() {
-  var r = executeApprovedCore_();
+/**
+ * Create transfer + email draft + CSV for approved lines. With donorWid+recipWid, does just
+ * that one from→to group (per-group button); with no args, does all approved groups.
+ */
+function webExecuteApproved(donorWid, recipWid) {
+  var opts = (donorWid && recipWid) ? { donorWid: donorWid, recipWid: recipWid } : {};
+  // DEMO_MODE (default on): just move approved rows to Log — no Brightpearl, no email.
+  var r = demoMode_() ? demoLogApproved_(opts) : executeApprovedCore_(opts);
   var data = getProposalsData();
   data.execMessage = r.summary;
   data.csv = r.csv || '';
   return data;
+}
+
+/** Build + return the transfer-list CSV for all approved groups, without creating anything. */
+function webExportApprovedCsv() {
+  return exportApprovedCsv_();
 }
 
 /** Latest transfer-list CSV text (from the Transfer CSV tab), for the dashboard download button. */

@@ -88,20 +88,22 @@ var DATA = null, VIEW = 'transfers';
 
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function pct(v){ if(v==null||v==='')return ''; var n=Number(v); return Math.round((n<=1?n*100:n))+'%'; }
-function isDone(x){ return /CREATED|DRY RUN|SHIPPED|RECEIVED/i.test(x.status||''); }
+function isDone(x){ return /CREATED|DRY RUN|SHIPPED|RECEIVED|LOGGED/i.test(x.status||''); }
 function setMsg(t){ document.getElementById('msg').textContent = t || ''; }
 function onErr(e){ setMsg('Error: ' + (e && e.message ? e.message : e)); }
 
 function refresh(){ setMsg('Loading…'); google.script.run.withSuccessHandler(function(d){ setMsg(''); onData(d); }).withFailureHandler(onErr).getProposalsData(); }
 function rerun(){ setMsg('Re-running the engine (reads your workbook, ~1 min)…'); google.script.run.withSuccessHandler(function(d){ setMsg('Re-run complete.'); onData(d); }).withFailureHandler(onErr).webRunProposal(); }
 function approve(rowIndex, val){ setMsg(val?'Approving…':'Skipping…'); google.script.run.withSuccessHandler(function(d){ setMsg(''); onData(d); }).withFailureHandler(onErr).webSetApprove(rowIndex, val); }
-function createApproved(){ if(!confirm('Create the transfer(s) + email draft(s) for all approved lines?\\n\\n' + (DATA && DATA.writesLive ? 'Brightpearl WRITES ARE LIVE — real transfers will be created.' : 'Dry run — draft emails only, nothing written to Brightpearl.'))) return; setMsg('Creating transfers + email drafts…'); google.script.run.withSuccessHandler(function(d){ setMsg(d.execMessage||'Done.'); if(d.csv) downloadCsv(d.csv); onData(d); }).withFailureHandler(onErr).webExecuteApproved(); }
+function createApproved(){ if(!confirm('Move all approved lines to the Log?\\n\\nDemo — no Brightpearl transfer and no email are created.')) return; setMsg('Moving to Log…'); google.script.run.withSuccessHandler(function(d){ setMsg(d.execMessage||'Done.'); if(d.csv) downloadCsv(d.csv); onData(d); }).withFailureHandler(onErr).webExecuteApproved(); }
 function downloadLatestCsv(){ setMsg('Preparing CSV…'); google.script.run.withSuccessHandler(function(t){ setMsg(''); downloadCsv(t); }).withFailureHandler(onErr).getLatestCsv(); }
 function downloadCsv(text){
   if(!text){ setMsg('No CSV yet — create a transfer first.'); return; }
   try{ var blob=new Blob([text],{type:'text/csv'}); var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download='realloc-transfer-'+new Date().toISOString().slice(0,10)+'.csv'; document.body.appendChild(a); a.click(); setTimeout(function(){URL.revokeObjectURL(url); a.remove();},1500); }
   catch(e){ setMsg('Download blocked here — the same CSV is in the "Transfer CSV" tab of the sheet.'); }
 }
+function createGroup(donorWid, recipWid){ if(!confirm('Move this from→to group to the Log?\\n\\nDemo — no transfer or email is created.')) return; setMsg('Moving to Log…'); google.script.run.withSuccessHandler(function(d){ setMsg(d.execMessage||'Done.'); if(d.csv) downloadCsv(d.csv); onData(d); }).withFailureHandler(onErr).webExecuteApproved(donorWid, recipWid); }
+function downloadExport(){ setMsg('Building CSV…'); google.script.run.withSuccessHandler(function(t){ setMsg(''); downloadCsv(t); }).withFailureHandler(onErr).webExportApprovedCsv(); }
 
 document.getElementById('tabs').addEventListener('click', function(e){
   var b = e.target.closest('button'); if(!b) return;
@@ -153,7 +155,7 @@ function moveCell(x){
 }
 
 function renderTransfers(c){
-  var rows = DATA.rows.filter(function(r){ return !isDone(r); }).slice().sort(sortToFrom);
+  var rows = DATA.rows.filter(function(r){ return !isDone(r) && !r.approve; }).slice().sort(sortToFrom);
   if(!rows.length){ c.innerHTML = '<div class="empty">No open proposals. Everything is executed, or run the weekly proposal.</div>'; return; }
   var head = '<thead><tr><th>Suit</th><th>Move (from &rarr; to)</th><th class="r">Rank gap</th><th>Recipient run</th><th class="r">Units</th><th class="r">Approve</th></tr></thead>';
   var body = rows.map(function(x){
@@ -187,15 +189,18 @@ function renderApproved(c){
   var appr = DATA.rows.filter(function(r){ return r.approve && !isDone(r); });
   if(!appr.length){ c.innerHTML = '<div class="empty">Nothing approved yet. Tick Approve on the Transfers tab.</div>'; return; }
   var pairs = pairsOf(appr);
-  var note = '<div class="note">Each row is one <b>consolidated transfer + one email draft</b> per sending&rarr;receiving store, covering all approved styles. '
-    + (DATA.writesLive ? 'Brightpearl writes are <b>LIVE</b>.' : 'Dry run: draft emails only, nothing hits Brightpearl.') + '</div>';
-  var bar = '<div class="bar"><button class="btn go" onclick="createApproved()">Create transfers + email drafts ('+pairs.length+')</button></div>';
-  var head = '<thead><tr><th>From &rarr; To</th><th>Styles</th><th class="r">Units</th></tr></thead>';
+  var note = '<div class="note">Each row is one <b>from&rarr;to group</b>. <b>Create</b> moves it to the <b>Log</b> '
+    + '(demo &mdash; no Brightpearl transfer and no email are created). Use <b>Export CSV</b> for the Brightpearl upload file. '
+    + 'Approvals &amp; logged items are saved &mdash; re-running the proposal keeps them.</div>';
+  var bar = '<div class="bar"><button class="btn go" onclick="createApproved()">Create all ('+pairs.length+')</button>'
+    + '<button class="btn" onclick="downloadExport()">Export CSV (for Brightpearl)</button></div>';
+  var head = '<thead><tr><th>From &rarr; To</th><th>Styles</th><th class="r">Units</th><th class="r">Action</th></tr></thead>';
   var body = pairs.map(function(p){
     var flag = p.noThreshold ? ' <span class="flag">confirm &mdash; no threshold</span>' : '';
     return '<tr><td class="tx-move"><span class="d">'+esc(p.donor)+'</span><span class="arw">&rarr;</span><span class="r">'+esc(p.recipient)+'</span>'+flag+'</td>'
       + '<td>'+p.styles.map(function(s){return '<span class="chip">'+esc(s)+'</span>';}).join('')+'</td>'
-      + '<td class="u">'+p.units+'</td></tr>';
+      + '<td class="u">'+p.units+'</td>'
+      + '<td class="acts"><button class="ap" onclick="createGroup(\''+esc(p.donorWid)+'\',\''+esc(p.recipWid)+'\')">Create</button></td></tr>';
   }).join('');
   c.innerHTML = note + bar + '<table>'+head+'<tbody>'+body+'</tbody></table>';
 }

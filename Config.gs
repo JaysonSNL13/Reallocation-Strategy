@@ -21,11 +21,19 @@ const PROP = {
   EMAIL_BCC: 'EMAIL_BCC',               // optional: BCC on every store pull-list email
   DRY_RUN_EMAIL: 'DRY_RUN_EMAIL',       // if set, ALL store emails route here instead (safe testing)
   DATA_SOURCE: 'DATA_SOURCE',           // 'sheet' (default) or 'bigquery'
-  SOURCE_SPREADSHEET_ID: 'SOURCE_SPREADSHEET_ID' // the "Store Dashboard for WebApp" workbook id
+  SOURCE_SPREADSHEET_ID: 'SOURCE_SPREADSHEET_ID', // the "Store Dashboard for WebApp" workbook id
+  DEMO_MODE: 'DEMO_MODE'                // 'true' (default): Create just moves rows to Log, no email/Brightpearl
 };
 
 // Where the engine reads its ranking input from. Defaults to the Store Dashboard workbook.
 function dataSource_() { return String(getProp_(PROP.DATA_SOURCE, 'sheet')).toLowerCase(); }
+
+/**
+ * Demo mode (default ON). When on, "Create transfer/email" only moves approved rows to Log —
+ * it does NOT create Brightpearl transfers or Gmail drafts. Devs set DEMO_MODE = false to
+ * turn on the real transfer + email actions.
+ */
+function demoMode_() { return String(getProp_(PROP.DEMO_MODE, 'true')).toLowerCase() !== 'false'; }
 
 // ---- BigQuery mirror --------------------------------------------------------
 const BQ = {

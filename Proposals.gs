@@ -36,58 +36,73 @@ const PROPOSAL_HEADERS = [
 
 function statusValue_(s) { return s || 'PROPOSED'; }
 
-/** Expand ranked moves into per-transfer rows and write them to the sheet. */
+/** Stable key for a proposed transfer line, used to preserve state across re-runs. */
+function proposalKey_(style, donorWid, recipWid) { return style + '|' + donorWid + '|' + recipWid; }
+
+function isDoneStatus_(s) { return /CREATED|DRY RUN|SHIPPED|RECEIVED|LOGGED/i.test(String(s || '')); }
+
+/**
+ * Expand ranked moves into per-transfer rows and write them to the sheet.
+ * MERGE, not overwrite: any line already Approved or done (LOGGED/CREATED/…) keeps that state
+ * on a re-run — so you never re-approve, and logged history persists even if the engine no
+ * longer proposes that line.
+ */
 function writeProposals_(moves) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName(SHEET.PROPOSALS) || ss.insertSheet(SHEET.PROPOSALS);
+
+  // Snapshot prior state by key.
+  var prior = {};
+  if (sh.getLastRow() > 1) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, PROPOSAL_HEADERS.length).getValues().forEach(function (r) {
+      var key = proposalKey_(r[COL.STYLE - 1], r[COL.DONOR_WH - 1], r[COL.RECIP_WH - 1]);
+      prior[key] = { approve: r[COL.APPROVE - 1] === true, status: r[COL.STATUS - 1],
+        transferId: r[COL.TRANSFER_ID - 1], updated: r[COL.UPDATED - 1], notes: r[COL.NOTES - 1], row: r };
+    });
+  }
+
   sh.clear();
   sh.getRange(1, 1, 1, PROPOSAL_HEADERS.length).setValues([PROPOSAL_HEADERS])
     .setFontWeight('bold').setBackground('#111111').setFontColor('#ffffff');
   sh.setFrozenRows(1);
 
-  var rows = [];
+  var rows = [], seen = {}, preserved = 0;
   moves.forEach(function (m, idx) {
     var rank = idx + 1;
     (m.donors || []).forEach(function (d) {
+      var key = proposalKey_(m.style, d.wid, m.recip_wid);
+      seen[key] = true;
+      var p = prior[key];
+      if (p && (p.approve || isDoneStatus_(p.status))) preserved++;
       var flags = [];
       if (m.force) flags.push('FORCE EMPTY');
       if (!m.has_thr) flags.push('CONFIRM — NO THRESHOLD');
       rows.push([
-        false,                                  // Approve
-        rank,                                   // Rank (shared across a recipient's donors)
-        m.force ? 'Force-empty' : 'Regular',    // Type
-        m.style,                                // Style
-        d.name, d.wid,                          // Donor store / WH
-        m.recipient, m.recip_wid,               // Recipient store / WH
-        m.rank_gap,                             // Rank gap
-        d.rank,                                 // Donor sales rank
-        m.recip_rank,                           // Recip sales rank
-        m.recip_run,                            // Recip run now
-        m.recip_final,                          // Recip run after
-        d.units,                                // donor holding (mirror)
-        flags.join(' · '),                      // Flags
-        '',                                     // Transfer ID
-        statusValue_(),                         // Status
-        '',                                     // Last update
-        ''                                      // Notes
+        p ? p.approve : false, rank, m.force ? 'Force-empty' : 'Regular', m.style,
+        d.name, d.wid, m.recipient, m.recip_wid, m.rank_gap, d.rank, m.recip_rank,
+        m.recip_run, m.recip_final, d.units, flags.join(' · '),
+        p ? p.transferId : '', p ? statusValue_(p.status) : statusValue_(),
+        p ? p.updated : '', p ? p.notes : ''
       ]);
     });
   });
 
+  // Persist prior Approved/logged lines the engine no longer proposes.
+  Object.keys(prior).forEach(function (key) {
+    if (seen[key]) return;
+    var p = prior[key];
+    if (p.approve || isDoneStatus_(p.status)) { rows.push(p.row); preserved++; }
+  });
+
   if (rows.length) {
     sh.getRange(2, 1, rows.length, PROPOSAL_HEADERS.length).setValues(rows);
-    // Approve column as checkboxes.
     sh.getRange(2, COL.APPROVE, rows.length, 1).insertCheckboxes();
-    // Percent format for run columns.
     sh.getRange(2, COL.RUN_NOW, rows.length, 2).setNumberFormat('0%');
   }
-
-  // Cosmetics.
   sh.autoResizeColumns(1, PROPOSAL_HEADERS.length);
-  sh.getRange(1, 1, sh.getMaxRows(), PROPOSAL_HEADERS.length).setVerticalAlignment('middle');
   formatFlagRows_(sh, rows.length);
 
-  Log.info('Wrote ' + rows.length + ' proposed transfers across ' + moves.length + ' recipient moves.');
+  Log.info('Wrote ' + rows.length + ' proposal rows (preserved ' + preserved + ' already approved/logged).');
   return rows.length;
 }
 
