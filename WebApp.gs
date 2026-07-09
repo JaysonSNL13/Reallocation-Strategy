@@ -90,3 +90,11 @@ function webRunProposal() {
   runWeeklyProposal();
   return getProposalsData();
 }
+
+/** Create transfers + email drafts for all approved lines (consolidated per store pair). */
+function webExecuteApproved() {
+  var r = executeApprovedCore_();
+  var data = getProposalsData();
+  data.execMessage = r.summary;
+  return data;
+}

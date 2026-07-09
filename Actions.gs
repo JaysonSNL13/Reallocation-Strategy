@@ -18,93 +18,108 @@ function executeApprovedTransfers() {
     ui_().alert('Nothing to execute', 'No rows are ticked "Approve" (or they are already created).', ui_().ButtonSet.OK);
     return;
   }
-
   var live = writesEnabled_();
   var noThr = countNoThresholdApprovals_(approved);
-  var confirmMsg = approved.length + ' transfer(s) approved.' +
+  var confirmMsg = approved.length + ' approved line(s), consolidated into one transfer + email per donor→recipient pair.' +
     (noThr ? ('\n' + noThr + ' are to stores with NO threshold set — approving confirms those stores want the style.') : '') +
     '\n\nBrightpearl writes are ' + (live ? 'ENABLED — this will create real transfers and zero thresholds.' : 'DISABLED (dry run) — nothing will be written.') +
     '\n\nProceed?';
-  var resp = ui_().alert('Execute approved transfers', confirmMsg, ui_().ButtonSet.OK_CANCEL);
-  if (resp !== ui_().Button.OK) return;
+  if (ui_().alert('Execute approved transfers', confirmMsg, ui_().ButtonSet.OK_CANCEL) !== ui_().Button.OK) return;
+  var r = executeApprovedCore_();
+  ui_().alert('Done', r.summary, ui_().ButtonSet.OK);
+}
 
-  // Product map for all approved styles (for pull lists), fetched once.
+/**
+ * Headless execute (no UI) — used by the menu wrapper AND the web dashboard button.
+ * CONSOLIDATES approved lines by donor→recipient so ONE transfer and ONE email cover every
+ * approved style for that store pair. Returns { summary, created, skipped, drafts }.
+ */
+function executeApprovedCore_() {
+  var approved = readApprovedRows_();
+  if (!approved.length) return { summary: 'Nothing approved to execute.', created: 0, skipped: 0, drafts: 0 };
+  var live = writesEnabled_();
+
   var styles = uniq_(approved.map(function (a) { return a.style; }));
   var styleProducts = getStyleProducts_(styles);
-
-  // Live availability for all in-scope productIds.
   var allPids = [];
   styles.forEach(function (s) { (styleProducts[s] || []).forEach(function (p) { allPids.push(p.product_id); }); });
-  var avail = BP.getAvailability(uniq_(allPids));
+  var usingLive = bpConfigured_();
+  var avail = usingLive ? BP.getAvailability(uniq_(allPids)) : getSheetAvailability_(styles);
+  Log.info('Execute using ' + (usingLive ? 'LIVE Brightpearl availability' : 'PREVIEW availability from the workbook') + '.');
 
-  var byDonor = {};        // donorWid -> {name, items:[...]}
-  var receiving = [];      // rows for Receiving Priority
-  var trackerRows = [];    // rows for Tracker
+  // Consolidate approved lines by donor→recipient pair.
+  var pairs = {};
+  approved.forEach(function (row) {
+    var k = row.donorWid + '|' + row.recipWid;
+    var p = pairs[k] || (pairs[k] = { donorWid: row.donorWid, donorName: row.donorName, recipWid: row.recipWid,
+      recipientName: row.recipientName, force: false, rows: [], styles: {} });
+    p.rows.push(row); p.styles[row.style] = true; if (row.force) p.force = true;
+  });
+
+  var byDonor = {}, receiving = [], trackerRows = [];
   var stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd');
   var created = 0, skipped = 0;
 
-  approved.forEach(function (row) {
-    var prods = styleProducts[row.style] || [];
-    // Everything the donor still holds of this style, live.
+  Object.keys(pairs).forEach(function (k) {
+    var p = pairs[k];
     var items = [];
-    prods.forEach(function (p) {
-      var a = (avail[p.product_id] && avail[p.product_id][row.donorWid]) || null;
-      var qty = a ? a.available : 0;
-      if (qty > 0) items.push({ productId: p.product_id, sku: p.sku, garment: p.garment, size: p.size, quantity: qty });
+    Object.keys(p.styles).forEach(function (style) {
+      (styleProducts[style] || []).forEach(function (prod) {
+        var a = (avail[prod.product_id] && avail[prod.product_id][p.donorWid]) || null;
+        var qty = a ? a.available : 0;
+        if (qty > 0) items.push({ productId: prod.product_id, sku: prod.sku, garment: prod.garment, size: prod.size, style: style, quantity: qty });
+      });
     });
 
     if (!items.length) {
-      markRow_(row.rowIndex, { status: 'SKIPPED — no live stock', notes: 'Donor holds 0 available at approval time.' });
+      p.rows.forEach(function (row) { markRow_(row.rowIndex, { status: 'SKIPPED — no live stock', notes: 'Donor holds 0 available at execution.' }); });
       skipped++;
       return;
     }
 
-    var reference = 'PURGE-PRIORITY-REALLOC-' + slug_(row.style) + '-' + row.donorWid + 'to' + row.recipWid + '-' + stamp;
+    var reference = 'PURGE-PRIORITY-REALLOC-' + p.donorWid + 'to' + p.recipWid + '-' + stamp;
     var result;
     try {
-      result = BP.createStockTransfer(row.donorWid, row.recipWid,
-        reference, items.map(function (it) { return { productId: it.productId, quantity: it.quantity }; }));
+      result = BP.createStockTransfer(p.donorWid, p.recipWid, reference,
+        items.map(function (it) { return { productId: it.productId, quantity: it.quantity }; }));
     } catch (e) {
-      markRow_(row.rowIndex, { status: 'ERROR', notes: String(e.message || e) });
-      Log.error('Transfer failed ' + row.donorWid + '->' + row.recipWid + ' ' + row.style + ': ' + e);
+      p.rows.forEach(function (row) { markRow_(row.rowIndex, { status: 'ERROR', notes: String(e.message || e) }); });
+      Log.error('Transfer failed ' + p.donorWid + '->' + p.recipWid + ': ' + e);
       return;
     }
-
     var tid = result.stockTransferId || (result.dryRun ? 'DRY-RUN' : '');
-    markRow_(row.rowIndex, {
-      transferId: tid,
-      status: result.dryRun ? 'DRY RUN' : 'CREATED',
-      notes: reference + (result.goodsOutNoteIds && result.goodsOutNoteIds.length ? (' · GON ' + result.goodsOutNoteIds.join(',')) : '')
+    p.rows.forEach(function (row) {
+      markRow_(row.rowIndex, { transferId: tid, status: result.dryRun ? 'DRY RUN' : 'CREATED',
+        notes: reference + (result.goodsOutNoteIds && result.goodsOutNoteIds.length ? (' · GON ' + result.goodsOutNoteIds.join(',')) : '') });
     });
     created++;
 
-    // Zero the donor's reorderLevel for each shipped SKU.
     items.forEach(function (it) {
-      try { BP.zeroReorderLevel(row.donorWid, it.productId); }
-      catch (e) { Log.warn('zeroReorderLevel failed wh ' + row.donorWid + ' pid ' + it.productId + ': ' + e); }
+      try { BP.zeroReorderLevel(p.donorWid, it.productId); }
+      catch (e) { Log.warn('zeroReorderLevel failed wh ' + p.donorWid + ' pid ' + it.productId + ': ' + e); }
     });
 
-    // Accumulate donor email.
-    var d = byDonor[row.donorWid] || (byDonor[row.donorWid] = { name: row.donorName, items: [] });
+    var d = byDonor[p.donorWid] || (byDonor[p.donorWid] = { name: p.donorName, items: [] });
     items.forEach(function (it) {
-      d.items.push({ recipientName: row.recipientName, style: row.style, garment: it.garment, size: it.size, sku: it.sku, qty: it.quantity, transferId: tid });
+      d.items.push({ recipientName: p.recipientName, style: it.style, garment: it.garment, size: it.size, sku: it.sku, qty: it.quantity, transferId: tid });
     });
 
-    // Receiving + tracker.
     var units = items.reduce(function (a, it) { return a + it.quantity; }, 0);
-    receiving.push([new Date(), tid, row.style, row.donorName, row.recipientName, units, reference, row.force ? 'FORCE' : '']);
-    trackerRows.push([new Date(), tid, row.style, row.donorName, row.donorWid, row.recipientName, row.recipWid, units,
-      (result.goodsOutNoteIds || []).join(','), 'CREATED', new Date(), 0, row.force ? 'FORCE' : 'REGULAR']);
+    var styleLabel = Object.keys(p.styles).join(', ');
+    receiving.push([new Date(), tid, styleLabel, p.donorName, p.recipientName, units, reference, p.force ? 'FORCE' : '']);
+    trackerRows.push([new Date(), tid, styleLabel, p.donorName, p.donorWid, p.recipientName, p.recipWid, units,
+      (result.goodsOutNoteIds || []).join(','), 'CREATED', new Date(), 0, p.force ? 'FORCE' : 'REGULAR']);
   });
 
   var emailReport = sendStorePullLists_(byDonor);
   appendReceiving_(receiving);
   appendTracker_(trackerRows);
 
-  var summary = (live ? 'Created' : 'Dry-run created') + ' ' + created + ' transfer(s), skipped ' + skipped +
-    '. Emails: ' + emailReport.filter(function (r) { return r.sent; }).length + ' sent/preview.';
+  var drafts = emailReport.filter(function (r) { return r.drafted; }).length;
+  var summary = (live ? 'Created' : 'Dry-run created') + ' ' + created + ' consolidated transfer(s), skipped ' + skipped +
+    '. Email drafts: ' + drafts + ' (Gmail ▸ Drafts).';
   Log.info(summary);
-  ui_().alert('Done', summary, ui_().ButtonSet.OK);
+  return { summary: summary, created: created, skipped: skipped, drafts: drafts };
 }
 
 // ---- Receiving Priority + Tracker append helpers ---------------------------
