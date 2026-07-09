@@ -71,6 +71,8 @@ function getProposalsData() {
   out.asOf = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MMM d, yyyy h:mm a');
   out.writesLive = writesEnabled_();
   out.bpConfigured = bpConfigured_();
+  var csvSh = ss.getSheetByName(SHEET.TRANSFER_CSV);
+  out.hasCsv = !!(csvSh && csvSh.getLastRow() > 0);
   return out;
 }
 
@@ -96,5 +98,14 @@ function webExecuteApproved() {
   var r = executeApprovedCore_();
   var data = getProposalsData();
   data.execMessage = r.summary;
+  data.csv = r.csv || '';
   return data;
+}
+
+/** Latest transfer-list CSV text (from the Transfer CSV tab), for the dashboard download button. */
+function getLatestCsv() {
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET.TRANSFER_CSV);
+  if (!sh || sh.getLastRow() < 1) return '';
+  var vals = sh.getRange(1, 1, sh.getLastRow(), 4).getValues();
+  return vals.map(function (r) { return r.map(csvCell_).join(','); }).join('\r\n');
 }

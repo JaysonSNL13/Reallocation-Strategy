@@ -56,8 +56,9 @@ function executeApprovedCore_() {
     p.rows.push(row); p.styles[row.style] = true; if (row.force) p.force = true;
   });
 
-  var byDonor = {}, receiving = [], trackerRows = [];
+  var byDonor = {}, receiving = [], trackerRows = [], csvRows = [];
   var stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd');
+  var mdate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'M/d');
   var created = 0, skipped = 0;
 
   Object.keys(pairs).forEach(function (k) {
@@ -109,6 +110,12 @@ function executeApprovedCore_() {
     receiving.push([new Date(), tid, styleLabel, p.donorName, p.recipientName, units, reference, p.force ? 'FORCE' : '']);
     trackerRows.push([new Date(), tid, styleLabel, p.donorName, p.donorWid, p.recipientName, p.recipWid, units,
       (result.goodsOutNoteIds || []).join(','), 'CREATED', new Date(), 0, p.force ? 'FORCE' : 'REGULAR']);
+
+    // Zipline transfer-list CSV block: header row (blank A, From=donor in B, To=recipient in C,
+    // ref in D), then one SKU/qty row each (C and D blank — location/ref not repeated).
+    var csvRef = 'realloc-' + storeCode_(p.recipientName) + '-' + mdate;
+    csvRows.push(['', p.donorName, p.recipientName, csvRef]);
+    items.forEach(function (it) { csvRows.push([it.sku, it.quantity, '', '']); });
   });
 
   var emailReport = sendStorePullLists_(byDonor);
@@ -116,10 +123,26 @@ function executeApprovedCore_() {
   appendTracker_(trackerRows);
 
   var drafts = emailReport.filter(function (r) { return r.drafted; }).length;
+  if (csvRows.length) writeTransferCsv_(csvRows);
+  var csvText = csvRows.map(function (r) { return r.map(csvCell_).join(','); }).join('\r\n');
   var summary = (live ? 'Created' : 'Dry-run created') + ' ' + created + ' consolidated transfer(s), skipped ' + skipped +
-    '. Email drafts: ' + drafts + ' (Gmail ▸ Drafts).';
+    '. Email drafts: ' + drafts + '. Transfer-list CSV: ' + (csvRows.length ? 'ready to download' : 'none') + '.';
   Log.info(summary);
-  return { summary: summary, created: created, skipped: skipped, drafts: drafts };
+  return { summary: summary, created: created, skipped: skipped, drafts: drafts, csv: csvText };
+}
+
+/** CSV-escape a cell (quote if it contains comma/quote/newline). */
+function csvCell_(v) {
+  var s = String(v == null ? '' : v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+/** Write the transfer-list rows (A–D) to the Transfer CSV tab (overwrites each run). */
+function writeTransferCsv_(rows) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(SHEET.TRANSFER_CSV) || ss.insertSheet(SHEET.TRANSFER_CSV);
+  sh.clear();
+  if (rows.length) sh.getRange(1, 1, rows.length, 4).setValues(rows);
 }
 
 // ---- Receiving Priority + Tracker append helpers ---------------------------

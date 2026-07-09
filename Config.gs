@@ -36,6 +36,27 @@ const BQ = {
 // ---- Brightpearl ------------------------------------------------------------
 const DC_WAREHOUSE_ID = '2';                 // Ann Arbor DC — fulfillment, excluded from sell-through
 const DC_WAREHOUSE_NAME = 'Ann Arbor';       // how the DC appears in the INV tab's Warehouse column (vs "Ann Arbor POS" = the store)
+
+// Store name -> short code, for the transfer-CSV reference (realloc-<CODE>-<M/D>).
+const STORE_CODES = {
+  'Alexandria POS': 'ALX', 'Ann Arbor POS': 'AA', 'Basecamp POS': 'BC', 'Bellevue POS': 'BELL',
+  'Birmingham POS': 'BHAM', 'Boston POS': 'BOS', 'Century City POS': 'CC', 'Charleston POS': 'CHS',
+  'Chicago POS': 'CHI', 'Cincinnati POS': 'CINC', 'Cleveland POS': 'CLE', 'Columbus POS': 'CLB',
+  'DC POS': 'DC', 'Dallas POS': 'DAL', 'Dedham POS': 'DED', 'Denver POS': 'DEN', 'Flatiron POS': 'FLAT',
+  'Fort Lauderdale POS': 'FLL', 'Greenhills POS': 'GH', 'Greenville POS': 'GV', 'Greenwich POS': 'GW',
+  'Houston POS': 'HOU', 'Indianapolis POS': 'IND', 'Kansas City POS': 'KC', 'La Jolla POS': 'LJ',
+  'Lynnfield POS': 'LYN', 'Manhattan Beach POS': 'MB', 'Miami POS': 'MIA', 'Milwaukee POS': 'MKE',
+  'Minneapolis POS': 'MIN', 'Nashville POS': 'NASH', 'New York POS': 'NY', 'Newport Beach POS': 'NPB',
+  'Oakville StateandLiberty': 'OAK', 'Philadelphia POS': 'PHI', 'Pittsburgh POS': 'PIT',
+  'Roseville POS': 'ROSE', 'Salt Lake City POS': 'SLC', 'Scottsdale POS': 'SCOT', 'Tampa POS': 'TPA',
+  'Toronto State and Liberty': 'TNT', 'Walnut Creek POS': 'WC', 'Westport POS': 'WES'
+};
+
+/** Short code for a store name; falls back to a derived code if not mapped. */
+function storeCode_(name) {
+  if (STORE_CODES[name]) return STORE_CODES[name];
+  return String(name || '').replace(/\bPOS\b/i, '').replace(/[^A-Za-z]/g, '').slice(0, 4).toUpperCase() || 'STORE';
+}
 // Not real retail stores / bad mirror data. Never donors or recipients.
 const EXCLUDED_WAREHOUSES = ['2', '16', '17', '21', '29', '37', '42', '43', '44', '49'];
 
@@ -71,6 +92,7 @@ const SHEET = {
   RECEIVING: 'Receiving Priority',
   STORE_EMAILS: 'Store Emails',   // store name/warehouse id -> email address
   RUN_LOG: 'Run Log',
+  TRANSFER_CSV: 'Transfer CSV',
   SETTINGS: 'Settings'
 };
 
@@ -85,6 +107,11 @@ function getProp_(key, fallback) {
 /** Master write kill-switch. Defaults to OFF (dry run) unless explicitly "true". */
 function writesEnabled_() {
   return String(getProp_(PROP.BP_WRITES_ENABLED, 'false')).toLowerCase() === 'true';
+}
+
+/** True only when all Brightpearl credentials are present. Used to choose live vs preview. */
+function bpConfigured_() {
+  return !!(getProp_(PROP.BP_BASE_URL) && getProp_(PROP.BP_APP_REF) && getProp_(PROP.BP_ACCOUNT_TOKEN));
 }
 
 function bqBillingProject_() {

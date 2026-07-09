@@ -37,6 +37,27 @@ const BQ = {
 // ---- Brightpearl ------------------------------------------------------------
 const DC_WAREHOUSE_ID = '2';                 // Ann Arbor DC — fulfillment, excluded from sell-through
 const DC_WAREHOUSE_NAME = 'Ann Arbor';       // how the DC appears in the INV tab's Warehouse column (vs "Ann Arbor POS" = the store)
+
+// Store name -> short code, for the transfer-CSV reference (realloc-<CODE>-<M/D>).
+const STORE_CODES = {
+  'Alexandria POS': 'ALX', 'Ann Arbor POS': 'AA', 'Basecamp POS': 'BC', 'Bellevue POS': 'BELL',
+  'Birmingham POS': 'BHAM', 'Boston POS': 'BOS', 'Century City POS': 'CC', 'Charleston POS': 'CHS',
+  'Chicago POS': 'CHI', 'Cincinnati POS': 'CINC', 'Cleveland POS': 'CLE', 'Columbus POS': 'CLB',
+  'DC POS': 'DC', 'Dallas POS': 'DAL', 'Dedham POS': 'DED', 'Denver POS': 'DEN', 'Flatiron POS': 'FLAT',
+  'Fort Lauderdale POS': 'FLL', 'Greenhills POS': 'GH', 'Greenville POS': 'GV', 'Greenwich POS': 'GW',
+  'Houston POS': 'HOU', 'Indianapolis POS': 'IND', 'Kansas City POS': 'KC', 'La Jolla POS': 'LJ',
+  'Lynnfield POS': 'LYN', 'Manhattan Beach POS': 'MB', 'Miami POS': 'MIA', 'Milwaukee POS': 'MKE',
+  'Minneapolis POS': 'MIN', 'Nashville POS': 'NASH', 'New York POS': 'NY', 'Newport Beach POS': 'NPB',
+  'Oakville StateandLiberty': 'OAK', 'Philadelphia POS': 'PHI', 'Pittsburgh POS': 'PIT',
+  'Roseville POS': 'ROSE', 'Salt Lake City POS': 'SLC', 'Scottsdale POS': 'SCOT', 'Tampa POS': 'TPA',
+  'Toronto State and Liberty': 'TNT', 'Walnut Creek POS': 'WC', 'Westport POS': 'WES'
+};
+
+/** Short code for a store name; falls back to a derived code if not mapped. */
+function storeCode_(name) {
+  if (STORE_CODES[name]) return STORE_CODES[name];
+  return String(name || '').replace(/\bPOS\b/i, '').replace(/[^A-Za-z]/g, '').slice(0, 4).toUpperCase() || 'STORE';
+}
 // Not real retail stores / bad mirror data. Never donors or recipients.
 const EXCLUDED_WAREHOUSES = ['2', '16', '17', '21', '29', '37', '42', '43', '44', '49'];
 
@@ -72,6 +93,7 @@ const SHEET = {
   RECEIVING: 'Receiving Priority',
   STORE_EMAILS: 'Store Emails',   // store name/warehouse id -> email address
   RUN_LOG: 'Run Log',
+  TRANSFER_CSV: 'Transfer CSV',
   SETTINGS: 'Settings'
 };
 
@@ -102,7 +124,6 @@ function requireProp_(key) {
   if (!v) throw new Error('Missing Script Property: ' + key + ' (set it via Reallocation ▸ Setup).');
   return v;
 }
-
 /* ===================== Util.gs ===================== */
 /**
  * Util.gs — logging + small shared helpers.
@@ -1404,8 +1425,9 @@ function executeApprovedCore_() {
     p.rows.push(row); p.styles[row.style] = true; if (row.force) p.force = true;
   });
 
-  var byDonor = {}, receiving = [], trackerRows = [];
+  var byDonor = {}, receiving = [], trackerRows = [], csvRows = [];
   var stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd');
+  var mdate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'M/d');
   var created = 0, skipped = 0;
 
   Object.keys(pairs).forEach(function (k) {
@@ -1457,6 +1479,12 @@ function executeApprovedCore_() {
     receiving.push([new Date(), tid, styleLabel, p.donorName, p.recipientName, units, reference, p.force ? 'FORCE' : '']);
     trackerRows.push([new Date(), tid, styleLabel, p.donorName, p.donorWid, p.recipientName, p.recipWid, units,
       (result.goodsOutNoteIds || []).join(','), 'CREATED', new Date(), 0, p.force ? 'FORCE' : 'REGULAR']);
+
+    // Zipline transfer-list CSV block: header row (blank A, From=donor in B, To=recipient in C,
+    // ref in D), then one SKU/qty row each (C and D blank — location/ref not repeated).
+    var csvRef = 'realloc-' + storeCode_(p.recipientName) + '-' + mdate;
+    csvRows.push(['', p.donorName, p.recipientName, csvRef]);
+    items.forEach(function (it) { csvRows.push([it.sku, it.quantity, '', '']); });
   });
 
   var emailReport = sendStorePullLists_(byDonor);
@@ -1464,10 +1492,26 @@ function executeApprovedCore_() {
   appendTracker_(trackerRows);
 
   var drafts = emailReport.filter(function (r) { return r.drafted; }).length;
+  if (csvRows.length) writeTransferCsv_(csvRows);
+  var csvText = csvRows.map(function (r) { return r.map(csvCell_).join(','); }).join('\r\n');
   var summary = (live ? 'Created' : 'Dry-run created') + ' ' + created + ' consolidated transfer(s), skipped ' + skipped +
-    '. Email drafts: ' + drafts + ' (Gmail ▸ Drafts).';
+    '. Email drafts: ' + drafts + '. Transfer-list CSV: ' + (csvRows.length ? 'ready to download' : 'none') + '.';
   Log.info(summary);
-  return { summary: summary, created: created, skipped: skipped, drafts: drafts };
+  return { summary: summary, created: created, skipped: skipped, drafts: drafts, csv: csvText };
+}
+
+/** CSV-escape a cell (quote if it contains comma/quote/newline). */
+function csvCell_(v) {
+  var s = String(v == null ? '' : v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+/** Write the transfer-list rows (A–D) to the Transfer CSV tab (overwrites each run). */
+function writeTransferCsv_(rows) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(SHEET.TRANSFER_CSV) || ss.insertSheet(SHEET.TRANSFER_CSV);
+  sh.clear();
+  if (rows.length) sh.getRange(1, 1, rows.length, 4).setValues(rows);
 }
 
 // ---- Receiving Priority + Tracker append helpers ---------------------------
@@ -1990,6 +2034,8 @@ function getProposalsData() {
   out.asOf = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MMM d, yyyy h:mm a');
   out.writesLive = writesEnabled_();
   out.bpConfigured = bpConfigured_();
+  var csvSh = ss.getSheetByName(SHEET.TRANSFER_CSV);
+  out.hasCsv = !!(csvSh && csvSh.getLastRow() > 0);
   return out;
 }
 
@@ -2015,6 +2061,14 @@ function webExecuteApproved() {
   var r = executeApprovedCore_();
   var data = getProposalsData();
   data.execMessage = r.summary;
+  data.csv = r.csv || '';
   return data;
 }
 
+/** Latest transfer-list CSV text (from the Transfer CSV tab), for the dashboard download button. */
+function getLatestCsv() {
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET.TRANSFER_CSV);
+  if (!sh || sh.getLastRow() < 1) return '';
+  var vals = sh.getRange(1, 1, sh.getLastRow(), 4).getValues();
+  return vals.map(function (r) { return r.map(csvCell_).join(','); }).join('\r\n');
+}
