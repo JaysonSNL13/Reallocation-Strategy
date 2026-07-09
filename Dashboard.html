@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<base target="_top">
+<link rel="preconnect" href="https://api.fontshare.com" crossorigin>
+<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700,900&f[]=jetbrains-mono@400,500&display=swap" rel="stylesheet">
+<style>
+:root{ color-scheme:light; --bg:#fff; --ink:#000; --soft:#3a3a3a; --muted:#7a7a7a; --faint:#c4c4c4; --line:#e5e5e5; --hover:#fafafa; --green:#1e7a46; --amber:#b7791f; --red:#c0392b; --ok-bg:#f3f8f4;
+  --ui:'Satoshi',system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace; }
+*{box-sizing:border-box;}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;}
+.wrap{max-width:1180px;margin:0 auto;padding:18px 26px 56px;}
+.mono{font-family:var(--mono);}
+.head{display:flex;align-items:flex-end;justify-content:space-between;border-bottom:2px solid var(--ink);padding-bottom:12px;}
+.head h1{font-weight:700;font-size:clamp(20px,2.2vw,26px);letter-spacing:-0.01em;margin:0;}
+.head .sub{color:var(--muted);font-size:12.5px;margin-top:3px;max-width:720px;}
+.head .meta{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right;white-space:nowrap;}
+.pill{display:inline-block;font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.05em;padding:2px 7px;border:1px solid var(--line);border-radius:3px;margin-left:6px;}
+.pill.off{color:var(--muted);} .pill.live{color:var(--green);border-color:#9ed1b0;background:var(--ok-bg);}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-bottom:0;margin-top:18px;}
+.stats .c{border-bottom:1px solid var(--line);border-right:1px solid var(--line);padding:10px 14px;}
+.stats .c:nth-child(4){border-right:0;}
+.stats .l{font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);}
+.stats .v{font-family:var(--mono);font-size:18px;font-weight:500;margin-top:3px;} .stats .v.g{color:var(--green);}
+.bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:18px 0 4px;}
+.seg{display:inline-flex;border:1px solid var(--ink);}
+.seg button{border:0;border-right:1px solid var(--ink);background:transparent;color:var(--ink);padding:6px 13px;font-weight:700;font-size:11px;letter-spacing:.04em;text-transform:uppercase;cursor:pointer;font-family:var(--ui);}
+.seg button:last-child{border-right:0;} .seg button.active{background:var(--ink);color:var(--bg);}
+.btn{font-family:var(--ui);text-transform:uppercase;font-weight:700;font-size:10.5px;letter-spacing:.05em;padding:6px 12px;border:1px solid var(--ink);background:#fff;cursor:pointer;}
+.btn:hover{background:var(--ink);color:#fff;}
+table{width:100%;border-collapse:collapse;margin-top:8px;}
+thead th{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);}
+thead th.r{text-align:right;}
+tbody td{font-size:13.5px;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:middle;}
+tbody tr:hover{background:var(--hover);}
+.tx-suit{white-space:nowrap;padding-right:16px;} .tx-suit b{font-weight:700;}
+.tx-move{font-weight:500;white-space:nowrap;} .tx-move .d{color:var(--soft);} .tx-move .arw{color:var(--muted);margin:0 8px;font-family:var(--mono);} .tx-move .r{color:var(--ink);font-weight:700;}
+.tx-move .rk{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-left:6px;}
+.u{font-family:var(--mono);font-size:13px;text-align:right;} .gap{font-family:var(--mono);font-size:13px;text-align:right;}
+.run{font-family:var(--mono);font-size:12px;color:var(--soft);white-space:nowrap;} .run b{color:var(--green);}
+.ftag span{display:inline-block;white-space:nowrap;font-size:9px;font-weight:700;color:#c0392b;background:#fbeceb;border:1px solid #e8a39d;border-radius:3px;padding:1px 6px;text-transform:uppercase;letter-spacing:.03em;}
+.flag{font-family:var(--mono);font-size:9.5px;color:var(--amber);border:1px solid #ecd9b0;background:#fcf8ef;padding:1px 5px;border-radius:3px;white-space:nowrap;}
+.acts{text-align:right;white-space:nowrap;}
+.acts button{font-family:var(--ui);text-transform:uppercase;font-weight:700;font-size:10.5px;letter-spacing:.05em;padding:5px 11px;border:1px solid;background:#fff;cursor:pointer;margin-left:7px;}
+.ap{border-color:var(--green);color:var(--green);} .ap:hover{background:var(--green);color:#fff;}
+.sk{border-color:var(--line);color:var(--muted);} .sk:hover{background:var(--soft);color:#fff;border-color:var(--soft);}
+tr.approved{background:var(--ok-bg);} tr.approved .ap{background:var(--green);color:#fff;}
+tr.done td{color:var(--muted);}
+.stbadge{font-family:var(--mono);font-size:10px;padding:1px 6px;border:1px solid var(--line);border-radius:3px;color:var(--muted);}
+.sect{font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:22px 0 2px;}
+.loading,.empty{border:1px solid var(--line);padding:34px;text-align:center;color:var(--muted);margin-top:20px;font-family:var(--mono);font-size:12px;}
+.foot{text-align:center;font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:26px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div>
+      <h1>Suit Reallocation</h1>
+      <div class="sub">Dead store &rarr; proven seller. Ranked by rank gap. Approve a line to record it; force-empties grouped last.</div>
+    </div>
+    <div class="meta"><span id="asof"></span><br><span id="mode"></span></div>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="bar">
+    <div class="seg"><button class="active">Transfers</button></div>
+    <button class="btn" onclick="refresh()">Reload</button>
+    <button class="btn" onclick="rerun()">Re-run proposal</button>
+    <span class="mono" id="msg" style="font-size:11px;color:var(--muted)"></span>
+  </div>
+
+  <div id="content"><div class="loading">Loading live proposals&hellip;</div></div>
+  <div class="foot">State &amp; Liberty &middot; store-to-store reallocation &middot; nothing ships until approved</div>
+</div>
+
+<script>
+var DATA = null;
+
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function pct(v){ if(v==null||v==='')return ''; var n=Number(v); return Math.round((n<=1?n*100:n))+'%'; }
+
+function refresh(){ google.script.run.withSuccessHandler(onData).withFailureHandler(onErr).getProposalsData(); }
+function rerun(){ setMsg('Re-running the engine… (this reads your workbook, ~1 min)'); google.script.run.withSuccessHandler(function(d){ setMsg('Re-run complete.'); onData(d); }).withFailureHandler(onErr).webRunProposal(); }
+function setMsg(t){ document.getElementById('msg').textContent = t || ''; }
+function onErr(e){ setMsg('Error: ' + (e && e.message ? e.message : e)); }
+
+function approve(rowIndex, val, btn){ btn.disabled=true; setMsg(val?'Approving…':'Skipping…'); google.script.run.withSuccessHandler(function(d){ setMsg(''); onData(d); }).withFailureHandler(onErr).webSetApprove(rowIndex, val); }
+
+function onData(d){
+  DATA = d;
+  document.getElementById('asof').textContent = 'As of ' + (d.asOf||'');
+  document.getElementById('mode').innerHTML = 'Brightpearl writes: ' + (d.writesLive ? '<span class="pill live">Live</span>' : '<span class="pill off">Off (dry run)</span>');
+  renderStats(d.stats);
+  renderRows(d.rows);
+}
+
+function renderStats(s){
+  var cells = [
+    ['Transfers', s.transfers],
+    ['Units', s.units],
+    ['Donor / recipient stores', s.donors + ' / ' + s.recipients],
+    ['Approved', s.approved + (s.forceEmpties? '  ·  ' + s.forceEmpties + ' force-empty' : '')]
+  ];
+  document.getElementById('stats').innerHTML = cells.map(function(c){
+    return '<div class="c"><div class="l">'+c[0]+'</div><div class="v'+(c[0]==='Approved'?' g':'')+'">'+esc(c[1])+'</div></div>';
+  }).join('');
+}
+
+function rowHtml(x){
+  var done = /CREATED|DRY RUN|SHIPPED|RECEIVED/i.test(x.status||'');
+  var cls = (x.approve?'approved ':'') + (done?'done':'');
+  var ftag = x.force ? '<div class="ftag"><span>force empty</span></div>' : '';
+  var flag = x.noThreshold ? '<span class="flag">confirm &mdash; no threshold</span>' : '';
+  var acts = done
+    ? '<span class="stbadge">'+esc(x.status)+'</span>'
+    : '<button class="ap" onclick="approve('+x.rowIndex+',true,this)">Approve</button>'
+      + '<button class="sk" onclick="approve('+x.rowIndex+',false,this)">Skip</button>';
+  return '<tr class="'+cls+'">'
+    + '<td class="tx-suit"><b>'+esc(x.style)+'</b>'+ftag+'</td>'
+    + '<td class="tx-move"><span class="d">'+esc(x.donor)+'</span> <span class="rk">#'+esc(x.donorRank)+'</span>'
+        + '<span class="arw">&rarr;</span><span class="r">'+esc(x.recipient)+'</span> <span class="rk">#'+esc(x.recipRank)+'</span>'
+        + (flag? ' '+flag : '') + '</td>'
+    + '<td class="gap">'+esc(x.gap)+'</td>'
+    + '<td class="run">'+pct(x.runNow)+' <span class="arw">&rarr;</span> <b>'+pct(x.runAfter)+'</b></td>'
+    + '<td class="u">'+esc(x.units)+'</td>'
+    + '<td class="acts">'+acts+'</td>'
+    + '</tr>';
+}
+
+function renderRows(rows){
+  var c = document.getElementById('content');
+  if(!rows || !rows.length){ c.innerHTML = '<div class="empty">No proposed transfers. Run the weekly proposal first.</div>'; return; }
+  var reg = rows.filter(function(r){return !r.force;});
+  var fe  = rows.filter(function(r){return r.force;});
+  var head = '<thead><tr><th>Suit</th><th>Move (donor &rarr; recipient)</th><th class="r">Rank gap</th><th>Recipient run</th><th class="r">Units</th><th class="r">Approve</th></tr></thead>';
+  var html = '';
+  if(reg.length){ html += '<table>'+head+'<tbody>'+reg.map(rowHtml).join('')+'</tbody></table>'; }
+  if(fe.length){ html += '<div class="sect">Force-empty &middot; clear fully dead stock</div><table>'+head+'<tbody>'+fe.map(rowHtml).join('')+'</tbody></table>'; }
+  c.innerHTML = html;
+}
+
+refresh();
+</script>
+</body>
+</html>
